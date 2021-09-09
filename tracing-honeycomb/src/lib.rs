@@ -29,6 +29,7 @@ pub(crate) mod deterministic_sampler;
 
 #[cfg(feature = "use_parking_lot")]
 use parking_lot::Mutex;
+use std::sync::Arc;
 #[cfg(not(feature = "use_parking_lot"))]
 use std::sync::Mutex;
 
@@ -70,16 +71,22 @@ pub fn new_blackhole_telemetry_layer(
 pub fn new_honeycomb_telemetry_layer(
     service_name: &'static str,
     honeycomb_config: libhoney::Config,
-) -> TelemetryLayer<HoneycombTelemetry<LibhoneyReporter>, SpanId, TraceId> {
+) -> (
+    TelemetryLayer<HoneycombTelemetry<LibhoneyReporter>, SpanId, TraceId>,
+    Guard<LibhoneyReporter>,
+) {
     let reporter = libhoney::init(honeycomb_config);
     // publishing requires &mut so just mutex-wrap it
     // FIXME: may not be performant, investigate options (eg mpsc)
-    let reporter = Mutex::new(reporter);
+    let reporter = Arc::new(Mutex::new(reporter));
 
-    TelemetryLayer::new(
-        service_name,
-        HoneycombTelemetry::new(reporter, None),
-        move |tracing_id| SpanId { tracing_id },
+    (
+        TelemetryLayer::new(
+            service_name,
+            HoneycombTelemetry::new(reporter.clone(), None),
+            move |tracing_id| SpanId { tracing_id },
+        ),
+        Guard { reporter },
     )
 }
 
@@ -103,16 +110,22 @@ pub fn new_honeycomb_telemetry_layer_with_trace_sampling(
     service_name: &'static str,
     honeycomb_config: libhoney::Config,
     sample_rate: u32,
-) -> TelemetryLayer<HoneycombTelemetry<LibhoneyReporter>, SpanId, TraceId> {
+) -> (
+    TelemetryLayer<HoneycombTelemetry<LibhoneyReporter>, SpanId, TraceId>,
+    Guard<LibhoneyReporter>,
+) {
     let reporter = libhoney::init(honeycomb_config);
     // publishing requires &mut so just mutex-wrap it
     // FIXME: may not be performant, investigate options (eg mpsc)
-    let reporter = Mutex::new(reporter);
+    let reporter = Arc::new(Mutex::new(reporter));
 
-    TelemetryLayer::new(
-        service_name,
-        HoneycombTelemetry::new(reporter, Some(sample_rate)),
-        move |tracing_id| SpanId { tracing_id },
+    (
+        TelemetryLayer::new(
+            service_name,
+            HoneycombTelemetry::new(reporter.clone(), Some(sample_rate)),
+            move |tracing_id| SpanId { tracing_id },
+        ),
+        Guard { reporter },
     )
 }
 
@@ -171,7 +184,7 @@ impl Builder<LibhoneyReporter> {
 
         // publishing requires &mut so just mutex-wrap it
         // FIXME: may not be performant, investigate options (eg mpsc)
-        let reporter = Mutex::new(reporter);
+        let reporter = Arc::new(Mutex::new(reporter));
 
         Self {
             reporter,
@@ -181,7 +194,7 @@ impl Builder<LibhoneyReporter> {
     }
 }
 
-impl<R: Reporter> Builder<R> {
+impl<R: Reporter + Clone> Builder<R> {
     /// Enables sampling for the telemetry layer.
     ///
     /// The `sample_rate` on the `libhoney::Config` is different from this in an important way.
@@ -201,11 +214,24 @@ impl<R: Reporter> Builder<R> {
     }
 
     /// Constructs the configured `TelemetryLayer`
-    pub fn build(self) -> TelemetryLayer<HoneycombTelemetry<R>, SpanId, TraceId> {
-        TelemetryLayer::new(
+    pub fn build(self) -> (TelemetryLayer<HoneycombTelemetry<R>, SpanId, TraceId>, Guard<R>) {
+        (TelemetryLayer::new(
             self.service_name,
-            HoneycombTelemetry::new(self.reporter, self.sample_rate),
+            HoneycombTelemetry::new(self.reporter.clone(), self.sample_rate),
             move |tracing_id| SpanId { tracing_id },
-        )
+        ), Guard { reporter: self.reporter } )
+    }
+}
+
+/// A guard object which is used to ensure that any outstanding telemetry events are
+/// sent to Honeycomb when this guard object is dropped.
+#[derive(Debug)]
+pub struct Guard<R: Reporter> {
+    reporter: R,
+}
+
+impl<R: Reporter> Drop for Guard<R> {
+    fn drop(&mut self) {
+        self.reporter.shutdown()
     }
 }

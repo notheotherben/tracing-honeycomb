@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use libhoney::FieldHolder;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 #[cfg(feature = "use_parking_lot")]
 use parking_lot::Mutex;
@@ -11,10 +11,13 @@ use std::sync::Mutex;
 pub trait Reporter {
     /// Reports data to the backend
     fn report_data(&self, data: HashMap<String, libhoney::Value>, timestamp: DateTime<Utc>);
+
+    /// Shuts down the reporter and ensures that all associated data is sent
+    fn shutdown(&self);
 }
 
 /// Reporter that sends events and spans to a [`libhoney::Client`]
-pub type LibhoneyReporter = Mutex<libhoney::Client<libhoney::transmission::Transmission>>;
+pub type LibhoneyReporter = Arc<Mutex<libhoney::Client<libhoney::transmission::Transmission>>>;
 impl Reporter for LibhoneyReporter {
     fn report_data(&self, data: HashMap<String, libhoney::Value>, timestamp: DateTime<Utc>) {
         // succeed or die. failure is unrecoverable (mutex poisoned)
@@ -33,6 +36,12 @@ impl Reporter for LibhoneyReporter {
             eprintln!("error sending event to honeycomb, {:?}", err);
         }
     }
+
+    fn shutdown(&self) {
+        self.lock()
+            .map(|mut r| r.flush().unwrap_or_default())
+            .unwrap();
+    }
 }
 
 /// Reporter that sends events and spans to stdout
@@ -43,5 +52,9 @@ impl Reporter for StdoutReporter {
         if let Ok(data) = serde_json::to_string(&data) {
             println!("{}", data);
         }
+    }
+
+    fn shutdown(&self) {
+        // no-op
     }
 }

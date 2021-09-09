@@ -50,7 +50,7 @@ async fn main() {
     let parent_span = iter.next();
     let trace_id = iter.next();
 
-    register_global_subscriber();
+    let _guard = register_global_subscriber();
 
     match (parent_span, trace_id) {
         (Some(parent_span), Some(trace_id)) => {
@@ -64,12 +64,9 @@ async fn main() {
             spawn_children(5, process_name).await;
         }
     }
-
-    // janky, but delay seems to be required to ensure all traces are sent to honeycomb by libhoney
-    delay_for(Duration::from_secs(10)).await
 }
 
-fn register_global_subscriber() {
+fn register_global_subscriber() -> tracing_honeycomb::Guard<tracing_honeycomb::LibhoneyReporter> {
     let honeycomb_key = std::fs::read_to_string("honeycomb.key")
         .expect("example requires honeycomb.key file with your honeycomb key");
 
@@ -82,7 +79,7 @@ fn register_global_subscriber() {
         transmission_options: libhoney::transmission::Options::default(),
     };
 
-    let telemetry_layer = new_honeycomb_telemetry_layer("async-tracing_example", honeycomb_config);
+    let (telemetry_layer, guard) = new_honeycomb_telemetry_layer("async-tracing_example", honeycomb_config);
 
     let subscriber = registry::Registry::default() // provide underlying span data store
         .with(LevelFilter::INFO) // filter out low-level debug tracing (eg tokio executor)
@@ -90,4 +87,6 @@ fn register_global_subscriber() {
         .with(telemetry_layer); // publish to honeycomb backend
 
     tracing::subscriber::set_global_default(subscriber).expect("setting global default failed");
+
+    guard
 }
